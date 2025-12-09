@@ -265,9 +265,6 @@ class Controller:
             )
 
         elif isinstance(message, str) and len(message) > 0:
-            translation = []
-            transliteration_message = []
-            transliteration_translation = []
             if model.checkKeywords(message):
                 self.run(
                     200,
@@ -277,48 +274,9 @@ class Controller:
                 return
             elif model.detectRepeatSendMessage(message):
                 return
-            elif config.ENABLE_TRANSLATION is False:
-                pass
-            else:
-                try:
-                    translation, success = model.getInputTranslate(message, source_language=language)
-                    if all(success) is not True:
-                        self.changeToCTranslate2Process()
-                        self.run(
-                            400,
-                            self.run_mapping["error_translation_engine"],
-                            {
-                                "message":"Translation engine limit error",
-                                "data": None
-                            },
-                        )
-                except Exception as e:
-                    # VRAM不足エラーの検出
-                    is_vram_error, error_message = model.detectVRAMError(e)
-                    if is_vram_error:
-                        self.run(
-                            400,
-                            self.run_mapping["error_translation_mic_vram_overflow"],
-                            {
-                                "message":"VRAM out of memory during translation of mic",
-                                "data": error_message
-                            },
-                        )
-                        # 翻訳機能をOFFにする
-                        self.setDisableTranslation()
-                        self.run(
-                            400,
-                            self.run_mapping["enable_translation"],
-                            {
-                                "message":"Translation disabled due to VRAM overflow",
-                                "data": False
-                            },
-                        )
-                        return
-                    else:
-                        # その他のエラーは通常通り処理
-                        raise
 
+            # Calculate transliteration for the original message immediately
+            transliteration_message = []
             if config.CONVERT_MESSAGE_TO_HIRAGANA is True or config.CONVERT_MESSAGE_TO_ROMAJI is True:
                 if config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"] == "Japanese":
                     transliteration_message = model.convertMessageToTransliteration(
@@ -327,34 +285,14 @@ class Controller:
                         romaji=config.CONVERT_MESSAGE_TO_ROMAJI
                     )
 
-                for i, no in enumerate(config.SELECTED_TAB_TARGET_LANGUAGES_NO_LIST):
-                    if (config.ENABLE_TRANSLATION is True and
-                        config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO][no]["language"] == "Japanese" and
-                        config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO][no]["enable"] is True
-                        ):
-                        transliteration_translation.append(
-                            model.convertMessageToTransliteration(
-                                translation[i],
-                                hiragana=config.CONVERT_MESSAGE_TO_HIRAGANA,
-                                romaji=config.CONVERT_MESSAGE_TO_ROMAJI
-                            )
-                        )
-                    else:
-                        transliteration_translation.append([])
-            else:
-                transliteration_translation = [[] for _ in config.SELECTED_TAB_TARGET_LANGUAGES_NO_LIST]
-
+            # Send transcription immediately without waiting for translation
             if config.ENABLE_TRANSCRIPTION_SEND is True:
-                if config.SEND_MESSAGE_TO_VRC is True:
-                    if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
-                        if config.ENABLE_TRANSLATION is False:
-                            osc_message = self.messageFormatter("SEND", [], message)
-                        else:
-                            osc_message = self.messageFormatter("SEND", translation, "")
-                    else:
-                        osc_message = self.messageFormatter("SEND", translation, message)
+                # Send to OSC immediately with just the transcription
+                if config.SEND_MESSAGE_TO_VRC is True and not config.SEND_ONLY_TRANSLATED_MESSAGES:
+                    osc_message = self.messageFormatter("SEND", [], message)
                     model.oscSendMessage(osc_message)
 
+                # Send to UI immediately with just the transcription
                 self.run(
                     200,
                     self.run_mapping["transcription_mic"],
@@ -363,39 +301,24 @@ class Controller:
                             "message": message,
                             "transliteration": transliteration_message
                         },
-                        "translations": [
-                            {
-                                "message": translation_message,
-                                "transliteration": transliteration
-                            } for translation_message, transliteration in zip(translation, transliteration_translation)
-                        ]
+                        "translations": []
                     })
 
+                # Send to overlay immediately (if not showing only translated messages)
                 if config.OVERLAY_LARGE_LOG is True and self._is_overlay_available():
-                    if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
-                        if len(translation) > 0:
-                            overlay_image = model.createOverlayImageLargeLog(
-                                "send",
-                                None,
-                                None,
-                                translation,
-                                config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
-                                transliteration_message,
-                                transliteration_translation
-                            )
-                            model.updateOverlayLargeLog(overlay_image)
-                    else:
+                    if not config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES:
                         overlay_image = model.createOverlayImageLargeLog(
                             "send",
                             message,
                             config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"],
-                            translation,
+                            [],
                             config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
                             transliteration_message,
-                            transliteration_translation
+                            []
                         )
                         model.updateOverlayLargeLog(overlay_image)
 
+                # Send to websocket immediately
                 if model.checkWebSocketServerAlive() is True:
                     model.websocketSendMessage(
                         {
@@ -403,14 +326,153 @@ class Controller:
                             "src_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
                             "dst_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
                             "message":message,
-                            "translation":translation,
-                            "transliteration":transliteration_translation
+                            "translation":[],
+                            "transliteration":[]
                         }
                     )
 
+                # Log immediately with just transcription
                 if config.LOGGER_FEATURE is True:
-                    translation_text = f" ({'/'.join(translation)})" if translation else ""
-                    model.logger.info(f"[SENT] {message}{translation_text}")
+                    model.logger.info(f"[SENT] {message}")
+
+            # Now perform translation asynchronously and update when ready
+            if config.ENABLE_TRANSLATION is True:
+                def translate_and_update():
+                    translation = []
+                    transliteration_translation = []
+                    try:
+                        translation, success = model.getInputTranslate(message, source_language=language)
+                        if all(success) is not True:
+                            self.changeToCTranslate2Process()
+                            self.run(
+                                400,
+                                self.run_mapping["error_translation_engine"],
+                                {
+                                    "message":"Translation engine limit error",
+                                    "data": None
+                                },
+                            )
+                    except Exception as e:
+                        # VRAM不足エラーの検出
+                        is_vram_error, error_message = model.detectVRAMError(e)
+                        if is_vram_error:
+                            self.run(
+                                400,
+                                self.run_mapping["error_translation_mic_vram_overflow"],
+                                {
+                                    "message":"VRAM out of memory during translation of mic",
+                                    "data": error_message
+                                },
+                            )
+                            # 翻訳機能をOFFにする
+                            self.setDisableTranslation()
+                            self.run(
+                                400,
+                                self.run_mapping["enable_translation"],
+                                {
+                                    "message":"Translation disabled due to VRAM overflow",
+                                    "data": False
+                                },
+                            )
+                            return
+                        else:
+                            # その他のエラーは通常通り処理
+                            errorLogging()
+                            return
+
+                    # Calculate transliteration for translations
+                    if config.CONVERT_MESSAGE_TO_HIRAGANA is True or config.CONVERT_MESSAGE_TO_ROMAJI is True:
+                        for i, no in enumerate(config.SELECTED_TAB_TARGET_LANGUAGES_NO_LIST):
+                            if (config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO][no]["language"] == "Japanese" and
+                                config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO][no]["enable"] is True
+                                ):
+                                transliteration_translation.append(
+                                    model.convertMessageToTransliteration(
+                                        translation[i],
+                                        hiragana=config.CONVERT_MESSAGE_TO_HIRAGANA,
+                                        romaji=config.CONVERT_MESSAGE_TO_ROMAJI
+                                    )
+                                )
+                            else:
+                                transliteration_translation.append([])
+                    else:
+                        transliteration_translation = [[] for _ in config.SELECTED_TAB_TARGET_LANGUAGES_NO_LIST]
+
+                    # Update with translation when ready
+                    if config.ENABLE_TRANSCRIPTION_SEND is True:
+                        # Update OSC with translation
+                        if config.SEND_MESSAGE_TO_VRC is True:
+                            if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
+                                osc_message = self.messageFormatter("SEND", translation, "")
+                            else:
+                                osc_message = self.messageFormatter("SEND", translation, message)
+                            model.oscSendMessage(osc_message)
+
+                        # Update UI with translation
+                        self.run(
+                            200,
+                            self.run_mapping["transcription_mic"],
+                            {
+                                "original": {
+                                    "message": message,
+                                    "transliteration": transliteration_message
+                                },
+                                "translations": [
+                                    {
+                                        "message": translation_message,
+                                        "transliteration": transliteration
+                                    } for translation_message, transliteration in zip(translation, transliteration_translation)
+                                ]
+                            })
+
+                        # Update overlay with translation
+                        if config.OVERLAY_LARGE_LOG is True and self._is_overlay_available():
+                            if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
+                                if len(translation) > 0:
+                                    overlay_image = model.createOverlayImageLargeLog(
+                                        "send",
+                                        None,
+                                        None,
+                                        translation,
+                                        config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
+                                        transliteration_message,
+                                        transliteration_translation
+                                    )
+                                    model.updateOverlayLargeLog(overlay_image)
+                            else:
+                                overlay_image = model.createOverlayImageLargeLog(
+                                    "send",
+                                    message,
+                                    config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"],
+                                    translation,
+                                    config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
+                                    transliteration_message,
+                                    transliteration_translation
+                                )
+                                model.updateOverlayLargeLog(overlay_image)
+
+                        # Update websocket with translation
+                        if model.checkWebSocketServerAlive() is True:
+                            model.websocketSendMessage(
+                                {
+                                    "type":"SENT",
+                                    "src_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                    "dst_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
+                                    "message":message,
+                                    "translation":translation,
+                                    "transliteration":transliteration_translation
+                                }
+                            )
+
+                        # Update log with translation
+                        if config.LOGGER_FEATURE is True:
+                            translation_text = f" ({'/'.join(translation)})"
+                            model.logger.info(f"[SENT] {message}{translation_text}")
+
+                # Start translation in a separate thread
+                th_translate = Thread(target=translate_and_update)
+                th_translate.daemon = True
+                th_translate.start()
 
     def speakerMessage(self, result:dict) -> None:
         message = result["text"]
@@ -425,9 +487,6 @@ class Controller:
                 },
             )
         elif isinstance(message, str) and len(message) > 0:
-            translation = []
-            transliteration_message = []
-            transliteration_translation = []
             if model.checkKeywords(message):
                 self.run(
                     200,
@@ -437,48 +496,9 @@ class Controller:
                 return
             elif model.detectRepeatReceiveMessage(message):
                 return
-            elif config.ENABLE_TRANSLATION is False:
-                pass
-            else:
-                try:
-                    translation, success = model.getOutputTranslate(message, source_language=language)
-                    if all(success) is not True:
-                        self.changeToCTranslate2Process()
-                        self.run(
-                            400,
-                            self.run_mapping["error_translation_engine"],
-                            {
-                                "message":"Translation engine limit error",
-                                "data": None
-                            },
-                        )
-                except Exception as e:
-                    # VRAM不足エラーの検出
-                    is_vram_error, error_message = model.detectVRAMError(e)
-                    if is_vram_error:
-                        self.run(
-                            400,
-                            self.run_mapping["error_translation_speaker_vram_overflow"],
-                            {
-                                "message":"VRAM out of memory during translation of speaker",
-                                "data": error_message
-                            },
-                        )
-                        # 翻訳機能をOFFにする
-                        self.setDisableTranslation()
-                        self.run(
-                            400,
-                            self.run_mapping["enable_translation"],
-                            {
-                                "message":"Translation disabled due to VRAM overflow",
-                                "data": False
-                            },
-                        )
-                        return
-                    else:
-                        # その他のエラーは通常通り処理
-                        raise
 
+            # Calculate transliteration for the original message immediately
+            transliteration_message = []
             if config.CONVERT_MESSAGE_TO_HIRAGANA is True or config.CONVERT_MESSAGE_TO_ROMAJI is True:
                 if language == "Japanese":
                     transliteration_message = model.convertMessageToTransliteration(
@@ -487,81 +507,40 @@ class Controller:
                         romaji=config.CONVERT_MESSAGE_TO_ROMAJI
                     )
 
-                if (config.ENABLE_TRANSLATION is True and
-                    config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"] == "Japanese"
-                    ):
-                    transliteration_translation.append(
-                        model.convertMessageToTransliteration(
-                            translation[0],
-                            hiragana=config.CONVERT_MESSAGE_TO_HIRAGANA,
-                            romaji=config.CONVERT_MESSAGE_TO_ROMAJI
-                        )
-                    )
-                else:
-                    transliteration_translation.append([])
-            else:
-                transliteration_translation = [[]]
-
+            # Send transcription immediately without waiting for translation
             if config.ENABLE_TRANSCRIPTION_RECEIVE is True:
+                # Send to overlay immediately (if not showing only translated messages)
                 if config.OVERLAY_SMALL_LOG is True and self._is_overlay_available():
-                    if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
-                        if len(translation) > 0:
-                            overlay_image = model.createOverlayImageSmallLog(
-                                None,
-                                None,
-                                translation,
-                                config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                transliteration_message,
-                                transliteration_translation
-                            )
-                            model.updateOverlaySmallLog(overlay_image)
-                    else:
+                    if not config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES:
                         overlay_image = model.createOverlayImageSmallLog(
                             message,
                             language,
-                            translation,
+                            [],
                             config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
                             transliteration_message,
-                            transliteration_translation
+                            []
                         )
                         model.updateOverlaySmallLog(overlay_image)
 
                 if config.OVERLAY_LARGE_LOG is True and self._is_overlay_available():
-                    if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
-                        if len(translation) > 0:
-                            overlay_image = model.createOverlayImageLargeLog(
-                                "receive",
-                                None,
-                                None,
-                                translation,
-                                config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                transliteration_message,
-                                transliteration_translation
-                            )
-                            model.updateOverlayLargeLog(overlay_image)
-                    else:
+                    if not config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES:
                         overlay_image = model.createOverlayImageLargeLog(
                             "receive",
                             message,
                             language,
-                            translation,
+                            [],
                             config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
                             transliteration_message,
-                            transliteration_translation
+                            []
                         )
                         model.updateOverlayLargeLog(overlay_image)
 
-                if config.SEND_RECEIVED_MESSAGE_TO_VRC is True:
-                    if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
-                        if config.ENABLE_TRANSLATION is False:
-                            osc_message = self.messageFormatter("RECEIVED", [], message)
-                        else:
-                            osc_message = self.messageFormatter("RECEIVED", translation, "")
-                    else:
-                        osc_message = self.messageFormatter("RECEIVED", translation, message)
+                # Send to OSC immediately with just the transcription
+                if config.SEND_RECEIVED_MESSAGE_TO_VRC is True and not config.SEND_ONLY_TRANSLATED_MESSAGES:
+                    osc_message = self.messageFormatter("RECEIVED", [], message)
                     model.oscSendMessage(osc_message)
 
-                # update textbox message log (Received)
+                # Send to UI immediately with just the transcription
                 self.run(
                     200,
                     self.run_mapping["transcription_speaker"],
@@ -570,14 +549,10 @@ class Controller:
                             "message": message,
                             "transliteration": transliteration_message
                         },
-                        "translations": [
-                            {
-                                "message": translation_message,
-                                "transliteration": transliteration
-                            } for translation_message, transliteration in zip(translation, transliteration_translation)
-                        ]
+                        "translations": []
                     })
 
+                # Send to websocket immediately
                 if model.checkWebSocketServerAlive() is True:
                     model.websocketSendMessage(
                         {
@@ -585,14 +560,173 @@ class Controller:
                             "src_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
                             "dst_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
                             "message":message,
-                            "translation":translation,
-                            "transliteration":transliteration_translation
+                            "translation":[],
+                            "transliteration":[]
                         }
                     )
 
+                # Log immediately with just transcription
                 if config.LOGGER_FEATURE is True:
-                    translation_text = f" ({'/'.join(translation)})" if translation else ""
-                    model.logger.info(f"[RECEIVED] {message}{translation_text}")
+                    model.logger.info(f"[RECEIVED] {message}")
+
+            # Now perform translation asynchronously and update when ready
+            if config.ENABLE_TRANSLATION is True:
+                def translate_and_update():
+                    translation = []
+                    transliteration_translation = []
+                    try:
+                        translation, success = model.getOutputTranslate(message, source_language=language)
+                        if all(success) is not True:
+                            self.changeToCTranslate2Process()
+                            self.run(
+                                400,
+                                self.run_mapping["error_translation_engine"],
+                                {
+                                    "message":"Translation engine limit error",
+                                    "data": None
+                                },
+                            )
+                    except Exception as e:
+                        # VRAM不足エラーの検出
+                        is_vram_error, error_message = model.detectVRAMError(e)
+                        if is_vram_error:
+                            self.run(
+                                400,
+                                self.run_mapping["error_translation_speaker_vram_overflow"],
+                                {
+                                    "message":"VRAM out of memory during translation of speaker",
+                                    "data": error_message
+                                },
+                            )
+                            # 翻訳機能をOFFにする
+                            self.setDisableTranslation()
+                            self.run(
+                                400,
+                                self.run_mapping["enable_translation"],
+                                {
+                                    "message":"Translation disabled due to VRAM overflow",
+                                    "data": False
+                                },
+                            )
+                            return
+                        else:
+                            # その他のエラーは通常通り処理
+                            errorLogging()
+                            return
+
+                    # Calculate transliteration for translations
+                    if config.CONVERT_MESSAGE_TO_HIRAGANA is True or config.CONVERT_MESSAGE_TO_ROMAJI is True:
+                        if config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"] == "Japanese":
+                            transliteration_translation.append(
+                                model.convertMessageToTransliteration(
+                                    translation[0],
+                                    hiragana=config.CONVERT_MESSAGE_TO_HIRAGANA,
+                                    romaji=config.CONVERT_MESSAGE_TO_ROMAJI
+                                )
+                            )
+                        else:
+                            transliteration_translation.append([])
+                    else:
+                        transliteration_translation = [[]]
+
+                    # Update with translation when ready
+                    if config.ENABLE_TRANSCRIPTION_RECEIVE is True:
+                        # Update overlays with translation
+                        if config.OVERLAY_SMALL_LOG is True and self._is_overlay_available():
+                            if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
+                                if len(translation) > 0:
+                                    overlay_image = model.createOverlayImageSmallLog(
+                                        None,
+                                        None,
+                                        translation,
+                                        config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                        transliteration_message,
+                                        transliteration_translation
+                                    )
+                                    model.updateOverlaySmallLog(overlay_image)
+                            else:
+                                overlay_image = model.createOverlayImageSmallLog(
+                                    message,
+                                    language,
+                                    translation,
+                                    config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                    transliteration_message,
+                                    transliteration_translation
+                                )
+                                model.updateOverlaySmallLog(overlay_image)
+
+                        if config.OVERLAY_LARGE_LOG is True and self._is_overlay_available():
+                            if config.OVERLAY_SHOW_ONLY_TRANSLATED_MESSAGES is True:
+                                if len(translation) > 0:
+                                    overlay_image = model.createOverlayImageLargeLog(
+                                        "receive",
+                                        None,
+                                        None,
+                                        translation,
+                                        config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                        transliteration_message,
+                                        transliteration_translation
+                                    )
+                                    model.updateOverlayLargeLog(overlay_image)
+                            else:
+                                overlay_image = model.createOverlayImageLargeLog(
+                                    "receive",
+                                    message,
+                                    language,
+                                    translation,
+                                    config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                    transliteration_message,
+                                    transliteration_translation
+                                )
+                                model.updateOverlayLargeLog(overlay_image)
+
+                        # Update OSC with translation
+                        if config.SEND_RECEIVED_MESSAGE_TO_VRC is True:
+                            if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
+                                osc_message = self.messageFormatter("RECEIVED", translation, "")
+                            else:
+                                osc_message = self.messageFormatter("RECEIVED", translation, message)
+                            model.oscSendMessage(osc_message)
+
+                        # Update UI with translation
+                        self.run(
+                            200,
+                            self.run_mapping["transcription_speaker"],
+                            {
+                                "original": {
+                                    "message": message,
+                                    "transliteration": transliteration_message
+                                },
+                                "translations": [
+                                    {
+                                        "message": translation_message,
+                                        "transliteration": transliteration
+                                    } for translation_message, transliteration in zip(translation, transliteration_translation)
+                                ]
+                            })
+
+                        # Update websocket with translation
+                        if model.checkWebSocketServerAlive() is True:
+                            model.websocketSendMessage(
+                                {
+                                    "type":"RECEIVED",
+                                    "src_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
+                                    "dst_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
+                                    "message":message,
+                                    "translation":translation,
+                                    "transliteration":transliteration_translation
+                                }
+                            )
+
+                        # Update log with translation
+                        if config.LOGGER_FEATURE is True:
+                            translation_text = f" ({'/'.join(translation)})"
+                            model.logger.info(f"[RECEIVED] {message}{translation_text}")
+
+                # Start translation in a separate thread
+                th_translate = Thread(target=translate_and_update)
+                th_translate.daemon = True
+                th_translate.start()
 
     def chatMessage(self, data) -> dict:
         id = data["id"]
