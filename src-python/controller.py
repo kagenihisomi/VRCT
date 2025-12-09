@@ -337,11 +337,16 @@ class Controller:
 
             # Now perform translation asynchronously and update when ready
             if config.ENABLE_TRANSLATION is True:
+                # Capture variables to avoid race conditions
+                captured_message = message
+                captured_language = language
+                captured_transliteration_message = transliteration_message
+                
                 def translate_and_update():
                     translation = []
                     transliteration_translation = []
                     try:
-                        translation, success = model.getInputTranslate(message, source_language=language)
+                        translation, success = model.getInputTranslate(captured_message, source_language=captured_language)
                         if all(success) is not True:
                             self.changeToCTranslate2Process()
                             self.run(
@@ -405,7 +410,7 @@ class Controller:
                             if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
                                 osc_message = self.messageFormatter("SEND", translation, "")
                             else:
-                                osc_message = self.messageFormatter("SEND", translation, message)
+                                osc_message = self.messageFormatter("SEND", translation, captured_message)
                             model.oscSendMessage(osc_message)
 
                         # Update UI with translation
@@ -414,8 +419,8 @@ class Controller:
                             self.run_mapping["transcription_mic"],
                             {
                                 "original": {
-                                    "message": message,
-                                    "transliteration": transliteration_message
+                                    "message": captured_message,
+                                    "transliteration": captured_transliteration_message
                                 },
                                 "translations": [
                                     {
@@ -435,18 +440,18 @@ class Controller:
                                         None,
                                         translation,
                                         config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
-                                        transliteration_message,
+                                        captured_transliteration_message,
                                         transliteration_translation
                                     )
                                     model.updateOverlayLargeLog(overlay_image)
                             else:
                                 overlay_image = model.createOverlayImageLargeLog(
                                     "send",
-                                    message,
+                                    captured_message,
                                     config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO]["1"]["language"],
                                     translation,
                                     config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
-                                    transliteration_message,
+                                    captured_transliteration_message,
                                     transliteration_translation
                                 )
                                 model.updateOverlayLargeLog(overlay_image)
@@ -458,7 +463,7 @@ class Controller:
                                     "type":"SENT",
                                     "src_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
                                     "dst_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
-                                    "message":message,
+                                    "message":captured_message,
                                     "translation":translation,
                                     "transliteration":transliteration_translation
                                 }
@@ -467,7 +472,7 @@ class Controller:
                         # Update log with translation
                         if config.LOGGER_FEATURE is True:
                             translation_text = f" ({'/'.join(translation)})"
-                            model.logger.info(f"[SENT] {message}{translation_text}")
+                            model.logger.info(f"[SENT] {captured_message}{translation_text}")
 
                 # Start translation in a separate thread
                 th_translate = Thread(target=translate_and_update)
@@ -571,11 +576,16 @@ class Controller:
 
             # Now perform translation asynchronously and update when ready
             if config.ENABLE_TRANSLATION is True:
+                # Capture variables to avoid race conditions
+                captured_message = message
+                captured_language = language
+                captured_transliteration_message = transliteration_message
+                
                 def translate_and_update():
                     translation = []
                     transliteration_translation = []
                     try:
-                        translation, success = model.getOutputTranslate(message, source_language=language)
+                        translation, success = model.getOutputTranslate(captured_message, source_language=captured_language)
                         if all(success) is not True:
                             self.changeToCTranslate2Process()
                             self.run(
@@ -640,17 +650,17 @@ class Controller:
                                         None,
                                         translation,
                                         config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                        transliteration_message,
+                                        captured_transliteration_message,
                                         transliteration_translation
                                     )
                                     model.updateOverlaySmallLog(overlay_image)
                             else:
                                 overlay_image = model.createOverlayImageSmallLog(
-                                    message,
-                                    language,
+                                    captured_message,
+                                    captured_language,
                                     translation,
                                     config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                    transliteration_message,
+                                    captured_transliteration_message,
                                     transliteration_translation
                                 )
                                 model.updateOverlaySmallLog(overlay_image)
@@ -664,18 +674,18 @@ class Controller:
                                         None,
                                         translation,
                                         config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                        transliteration_message,
+                                        captured_transliteration_message,
                                         transliteration_translation
                                     )
                                     model.updateOverlayLargeLog(overlay_image)
                             else:
                                 overlay_image = model.createOverlayImageLargeLog(
                                     "receive",
-                                    message,
-                                    language,
+                                    captured_message,
+                                    captured_language,
                                     translation,
                                     config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                    transliteration_message,
+                                    captured_transliteration_message,
                                     transliteration_translation
                                 )
                                 model.updateOverlayLargeLog(overlay_image)
@@ -685,7 +695,7 @@ class Controller:
                             if config.SEND_ONLY_TRANSLATED_MESSAGES is True:
                                 osc_message = self.messageFormatter("RECEIVED", translation, "")
                             else:
-                                osc_message = self.messageFormatter("RECEIVED", translation, message)
+                                osc_message = self.messageFormatter("RECEIVED", translation, captured_message)
                             model.oscSendMessage(osc_message)
 
                         # Update UI with translation
@@ -694,8 +704,8 @@ class Controller:
                             self.run_mapping["transcription_speaker"],
                             {
                                 "original": {
-                                    "message": message,
-                                    "transliteration": transliteration_message
+                                    "message": captured_message,
+                                    "transliteration": captured_transliteration_message
                                 },
                                 "translations": [
                                     {
@@ -712,7 +722,7 @@ class Controller:
                                     "type":"RECEIVED",
                                     "src_languages":config.SELECTED_TARGET_LANGUAGES[config.SELECTED_TAB_NO],
                                     "dst_languages":config.SELECTED_YOUR_LANGUAGES[config.SELECTED_TAB_NO],
-                                    "message":message,
+                                    "message":captured_message,
                                     "translation":translation,
                                     "transliteration":transliteration_translation
                                 }
@@ -721,7 +731,7 @@ class Controller:
                         # Update log with translation
                         if config.LOGGER_FEATURE is True:
                             translation_text = f" ({'/'.join(translation)})"
-                            model.logger.info(f"[RECEIVED] {message}{translation_text}")
+                            model.logger.info(f"[RECEIVED] {captured_message}{translation_text}")
 
                 # Start translation in a separate thread
                 th_translate = Thread(target=translate_and_update)
